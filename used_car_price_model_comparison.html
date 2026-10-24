@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Used Car Price Prediction: Neural Network vs Analytical Linear Regression</title>
+<style>
+:root{--bg:#fff;--fg:#1a202c;--mut:#5a6578;--card:#f4f6f9;--bd:#d9dee6;--a:#2b6cb0;--b:#2f855a;--r:#c53030}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--fg:#e8ecf1;--mut:#9aa6b8;--card:#1d222a;--bd:#2c333d;--a:#63a4e8;--b:#5fc08a;--r:#f08080}}
+*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--fg)}
+main{max-width:980px;margin:0 auto;padding:20px 14px 40px}h1{font-size:1.4rem;margin:0 0 4px}
+p.s{color:var(--mut);margin:0 0 14px}.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px;margin:14px 0}
+button{font:inherit;padding:9px 16px;border-radius:8px;border:1px solid var(--a);background:var(--a);color:#fff;cursor:pointer;margin:0 6px 6px 0}
+button.o{background:transparent;color:var(--a)}button:disabled{opacity:.5;cursor:default}
+table{border-collapse:collapse;width:100%}th,td{padding:7px 9px;border-bottom:1px solid var(--bd);text-align:right}th:first-child,td:first-child{text-align:left}
+.wrap{overflow-x:auto}.g{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:700px){.g{grid-template-columns:1fr}}
+canvas{width:100%;height:auto;background:var(--bg);border:1px solid var(--bd);border-radius:8px}
+.note{font-size:.88rem;color:var(--mut)}.bar{height:8px;background:var(--bd);border-radius:4px;overflow:hidden}.bar i{display:block;height:100%;width:0;background:var(--a)}
+</style></head><body><main>
+<h1>Used Car Price Prediction</h1>
+<p class="s">Basic Neural Network (MLP 64×32) vs Analytical Linear Regression (Normal Equation). Runs fully in your browser, offline, no installs.</p>
+<div class="card"><b>Data note:</b> the dataset is <b>simulated</b> (1,500 cars) from realistic depreciation rules plus noise. It is not real market data. Prices are in INR lakh.</div>
+<button id="run">Run project</button>
+<button id="dl1" class="o" disabled>Download dataset CSV</button>
+<button id="dl2" class="o" disabled>Download predictions CSV</button>
+<div class="card"><div class="bar"><i id="pb"></i></div><div id="st" class="note" style="margin-top:6px">Click "Run project" to generate data and train both models.</div></div>
+<div class="card wrap"><b>Model comparison (unseen 20% test set)</b>
+<table id="res"><tr><th>Model</th><th>MAE (lakh)</th><th>RMSE (lakh)</th><th>R²</th></tr></table></div>
+<div class="g"><canvas id="c1" width="480" height="420"></canvas><canvas id="c2" width="480" height="420"></canvas></div>
+<div class="card wrap"><b>Dataset preview (first 8 rows)</b><table id="prev"></table></div>
+<div class="card note"><b>Interpretation:</b> lower MAE/RMSE and higher R² mean a better fit. Car prices fall exponentially with age and depend on interactions (e.g. diesel and premium cars lose value faster with high mileage). A purely additive linear model cannot capture these; the neural network can.<br><b>Limitation:</b> results do not reflect real Indian used-car market prices.</div>
+</main>
+<script>
+// ===== CORE (data, models, metrics) =====
+function rngMaker(seed){let a=seed>>>0;return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function mkRand(seed){const r=rngMaker(seed);
+ return{u:r,n:(m,s)=>m+s*Math.sqrt(-2*Math.log(1-r()))*Math.cos(2*Math.PI*r()),
+ pick:(v,p)=>{let x=r(),c=0;for(let i=0;i<v.length;i++){c+=p[i];if(x<c)return v[i]}return v[v.length-1]},
+ perm:n=>{const a=[...Array(n).keys()];for(let i=n-1;i>0;i--){const j=Math.floor(r()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a}}}
+function generate(n,seed){const R=mkRand(seed),rows=[];
+ for(let i=0;i<n;i++){
+  const age=1+Math.floor(R.u()*15),km=Math.round(Math.min(250000,Math.max(2000,R.n(11000*age,4000))));
+  const eng=R.pick([800,1000,1200,1500,1800,2200],[.08,.18,.30,.22,.13,.09]);
+  const fuel=R.pick(["Petrol","Diesel","CNG"],[.55,.38,.07]),tr=R.pick(["Manual","Automatic"],[.72,.28]);
+  const own=R.pick([1,2,3],[.70,.24,.06]),br=R.pick(["Economy","Mid","Premium"],[.45,.40,.15]);
+  let base=2.5+eng/1000*2.8;base*={Economy:1,Mid:1.45,Premium:2.4}[br]*{Manual:1,Automatic:1.18}[tr]*{Petrol:1,Diesel:1.10,CNG:.92}[fuel];
+  const kp=1-0.0000022*km*(fuel=="Diesel"?1:.7)*(br=="Premium"?1.4:1);
+  let p=base*Math.exp(-0.095*age)*Math.min(1,Math.max(.3,kp))*(1-.06*(own-1))*R.n(1,.05);
+  rows.push({age_years:age,km_driven:km,engine_cc:eng,fuel,transmission:tr,owners:own,brand_tier:br,price_lakh_inr:Math.max(.3,+p.toFixed(3))})}
+ return rows}
+const FEATS=["age_years","km_driven","engine_cc","owners","fuel_Diesel","fuel_CNG","trans_Automatic","brand_Mid","brand_Premium"];
+const toX=r=>[r.age_years,r.km_driven,r.engine_cc,r.owners,+(r.fuel=="Diesel"),+(r.fuel=="CNG"),+(r.transmission=="Automatic"),+(r.brand_tier=="Mid"),+(r.brand_tier=="Premium")];
+function scaler(X){const d=X[0].length,m=Array(d).fill(0),s=Array(d).fill(0);
+ X.forEach(x=>x.forEach((v,j)=>m[j]+=v/X.length));X.forEach(x=>x.forEach((v,j)=>s[j]+=(v-m[j])**2/X.length));
+ return{m,s:s.map(v=>Math.sqrt(v)||1),f(x){return x.map((v,j)=>(v-this.m[j])/this.s[j])}}}
+function solve(A,b){const n=b.length;for(let i=0;i<n;i++){let p=i;for(let r=i+1;r<n;r++)if(Math.abs(A[r][i])>Math.abs(A[p][i]))p=r;
+ [A[i],A[p]]=[A[p],A[i]];[b[i],b[p]]=[b[p],b[i]];
+ for(let r=i+1;r<n;r++){const f=A[r][i]/A[i][i];for(let c=i;c<n;c++)A[r][c]-=f*A[i][c];b[r]-=f*b[i]}}
+ const x=Array(n).fill(0);for(let i=n-1;i>=0;i--){let s=b[i];for(let c=i+1;c<n;c++)s-=A[i][c]*x[c];x[i]=s/A[i][i]}return x}
+function fitLinear(X,y){const sc=scaler(X),A=X.map(x=>[1,...sc.f(x)]),d=A[0].length;
+ const G=Array.from({length:d},()=>Array(d).fill(0)),v=Array(d).fill(0);
+ A.forEach((a,i)=>{for(let p=0;p<d;p++){v[p]+=a[p]*y[i];for(let q=0;q<d;q++)G[p][q]+=a[p]*a[q]}});
+ for(let p=0;p<d;p++)G[p][p]+=1e-9;const th=solve(G,v);
+ return{predict:Xn=>Xn.map(x=>{const a=[1,...sc.f(x)];return a.reduce((s,t,j)=>s+t*th[j],0)})}}
+function NNTrainer(X,y,seed){const R=mkRand(seed),sc=scaler(X),ym=y.reduce((a,b)=>a+b,0)/y.length,ys=Math.sqrt(y.reduce((a,b)=>a+(b-ym)**2,0)/y.length);
+ const Xs=X.map(x=>sc.f(x)),Ys=y.map(v=>(v-ym)/ys),pm=R.perm(Xs.length),nv=Math.floor(.1*Xs.length);
+ const V=pm.slice(0,nv),T=pm.slice(nv),d=FEATS.length,H1=64,H2=32;
+ const mat=(r,c,s)=>Array.from({length:r},()=>Array.from({length:c},()=>R.n(0,s)));
+ const P={W1:mat(d,H1,Math.sqrt(2/d)),b1:Array(H1).fill(0),W2:mat(H1,H2,Math.sqrt(2/H1)),b2:Array(H2).fill(0),W3:mat(H2,1,Math.sqrt(2/H2)).map(r=>r[0]),b3:[0]};
+ const flat=()=>[...P.W1.flat(),...P.b1,...P.W2.flat(),...P.b2,...P.W3,...P.b3];
+ const M={},Vv={};for(const k in P){const z=o=>Array.isArray(o)?o.map(z):0;M[k]=z(P[k]);Vv[k]=z(P[k])}
+ const clone=()=>JSON.parse(JSON.stringify(P));
+ function fwd(x){const a1=P.b1.map((b,j)=>{let s=b;for(let i=0;i<d;i++)s+=x[i]*P.W1[i][j];return s>0?s:0});
+  const a2=P.b2.map((b,j)=>{let s=b;for(let i=0;i<H1;i++)s+=a1[i]*P.W2[i][j];return s>0?s:0});
+  let o=P.b3[0];for(let i=0;i<H2;i++)o+=a2[i]*P.W3[i];return{a1,a2,o}}
+ let best=Infinity,bestP=clone(),bad=0,t=0,ep=0,done=false;const lr=.01,l2=1e-4,BS=64,PAT=25,MAX=400;
+ function adam(k,i,j,g){const A=j===undefined?M[k]:M[k][i],B=j===undefined?Vv[k]:Vv[k][i],tgt=j===undefined?P[k]:P[k][i],idx=j===undefined?i:j;
+  A[idx]=.9*A[idx]+.1*g;B[idx]=.999*B[idx]+.001*g*g;tgt[idx]-=lr*(A[idx]/(1-.9**t))/(Math.sqrt(B[idx]/(1-.999**t))+1e-8)}
+ function epoch(){const ord=T.map((_,i)=>i).map(i=>T[i]);const o2=R.perm(ord.length).map(i=>ord[i]);
+  for(let s=0;s<o2.length;s+=BS){const idx=o2.slice(s,s+BS),n=idx.length;
+   const g={W1:P.W1.map(r=>r.map(()=>0)),b1:Array(H1).fill(0),W2:P.W2.map(r=>r.map(()=>0)),b2:Array(H2).fill(0),W3:Array(H2).fill(0),b3:[0]};
+   for(const id of idx){const x=Xs[id],{a1,a2,o}=fwd(x),do_=2/n*(o-Ys[id]);g.b3[0]+=do_;
+    const dz2=Array(H2);for(let j=0;j<H2;j++){g.W3[j]+=a2[j]*do_;dz2[j]=a2[j]>0?do_*P.W3[j]:0;g.b2[j]+=dz2[j]}
+    const dz1=Array(H1).fill(0);for(let i=0;i<H1;i++){for(let j=0;j<H2;j++){g.W2[i][j]+=a1[i]*dz2[j];if(a1[i]>0)dz1[i]+=dz2[j]*P.W2[i][j]}g.b1[i]+=dz1[i]}
+    for(let i=0;i<d;i++)for(let j=0;j<H1;j++)g.W1[i][j]+=x[i]*dz1[j]}
+   t++;
+   for(let i=0;i<d;i++)for(let j=0;j<H1;j++)adam("W1",i,j,g.W1[i][j]+l2*P.W1[i][j]);
+   for(let j=0;j<H1;j++)adam("b1",j,undefined,g.b1[j]);
+   for(let i=0;i<H1;i++)for(let j=0;j<H2;j++)adam("W2",i,j,g.W2[i][j]+l2*P.W2[i][j]);
+   for(let j=0;j<H2;j++){adam("b2",j,undefined,g.b2[j]);adam("W3",j,undefined,g.W3[j]+l2*P.W3[j])}
+   adam("b3",0,undefined,g.b3[0])}
+  let vl=0;for(const id of V)vl+=(fwd(Xs[id]).o-Ys[id])**2;vl/=V.length;
+  if(vl<best-1e-6){best=vl;bestP=clone();bad=0}else if(++bad>=PAT)done=true;
+  if(++ep>=MAX)done=true;return vl}
+ return{step:epoch,get done(){return done},get ep(){return ep},max:MAX,
+  model(){Object.assign(P,bestP);return{predict:Xn=>Xn.map(x=>fwd(sc.f(x)).o*ys+ym)}}}}
+const mae=(y,p)=>y.reduce((s,v,i)=>s+Math.abs(v-p[i]),0)/y.length;
+const rmse=(y,p)=>Math.sqrt(y.reduce((s,v,i)=>s+(v-p[i])**2,0)/y.length);
+const r2=(y,p)=>{const m=y.reduce((a,b)=>a+b,0)/y.length;return 1-y.reduce((s,v,i)=>s+(v-p[i])**2,0)/y.reduce((s,v)=>s+(v-m)**2,0)};
+// ===== UI =====
+if(typeof document!=="undefined"){
+const $=id=>document.getElementById(id);let ds=null,pred=null;
+function csv(rows){const k=Object.keys(rows[0]);return k.join(",")+"\n"+rows.map(r=>k.map(c=>r[c]).join(",")).join("\n")}
+function save(name,text){const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([text],{type:"text/csv"}));a.download=name;document.body.appendChild(a);a.click();a.remove()}
+function plot(cv,y,p,color,title){const c=cv.getContext("2d"),W=cv.width,Hh=cv.height,m=48,cs=getComputedStyle(document.documentElement);
+ const fg=cs.getPropertyValue("--fg"),mut=cs.getPropertyValue("--mut"),red=cs.getPropertyValue("--r");
+ c.clearRect(0,0,W,Hh);const hi=Math.max(...y,...p)*1.03,lo=Math.min(0,...p);
+ const X=v=>m+(v-lo)/(hi-lo)*(W-m-12),Y=v=>Hh-m-(v-lo)/(hi-lo)*(Hh-m-30);
+ c.strokeStyle=mut;c.fillStyle=mut;c.font="12px sans-serif";c.globalAlpha=.4;c.strokeRect(m,30,W-m-12,Hh-m-30);c.globalAlpha=1;
+ for(let i=0;i<=4;i++){const v=lo+(hi-lo)*i/4;c.fillText(v.toFixed(1),X(v)-8,Hh-m+16);c.fillText(v.toFixed(1),8,Y(v)+4)}
+ c.fillStyle=color;c.globalAlpha=.4;y.forEach((v,i)=>{c.beginPath();c.arc(X(v),Y(p[i]),2.8,0,7);c.fill()});c.globalAlpha=1;
+ c.strokeStyle=red;c.setLineDash([6,4]);c.lineWidth=1.5;c.beginPath();c.moveTo(X(lo),Y(lo));c.lineTo(X(hi),Y(hi));c.stroke();c.setLineDash([]);
+ c.fillStyle=fg;c.font="bold 14px sans-serif";c.fillText(title,m,20);c.font="12px sans-serif";c.fillStyle=mut;
+ c.fillText("Actual price (INR lakh)",W/2-60,Hh-8);c.save();c.translate(12,Hh/2+50);c.rotate(-Math.PI/2);c.fillText("Predicted (INR lakh)",0,0);c.restore()}
+$("dl1").onclick=()=>save("used_car_dataset.csv",csv(ds));
+$("dl2").onclick=()=>save("predictions.csv",csv(pred));
+$("run").onclick=()=>{$("run").disabled=true;$("dl1").disabled=$("dl2").disabled=true;
+ const st=t=>$("st").textContent=t,pb=v=>$("pb").style.width=v+"%";
+ st("Generating simulated dataset...");pb(2);
+ setTimeout(()=>{ds=generate(1500,42);
+  const keys=Object.keys(ds[0]);$("prev").innerHTML="<tr>"+keys.map(k=>"<th>"+k+"</th>").join("")+"</tr>"+ds.slice(0,8).map(r=>"<tr>"+keys.map(k=>"<td>"+r[k]+"</td>").join("")+"</tr>").join("");
+  const ord=mkRand(42).perm(ds.length),nt=Math.round(ds.length*.2),te=ord.slice(0,nt),tr=ord.slice(nt);
+  const Xtr=tr.map(i=>toX(ds[i])),ytr=tr.map(i=>ds[i].price_lakh_inr),Xte=te.map(i=>toX(ds[i])),yte=te.map(i=>ds[i].price_lakh_inr);
+  st("Training analytical linear regression (Normal Equation)...");
+  const lin=fitLinear(Xtr,ytr),pl=lin.predict(Xte);pb(10);
+  const tr_=NNTrainer(Xtr,ytr,42);
+  (function loop(){const t0=performance.now();while(!tr_.done&&performance.now()-t0<30)tr_.step();
+   pb(10+85*tr_.ep/tr_.max);st("Training neural network... epoch "+tr_.ep);
+   if(!tr_.done)return void setTimeout(loop,0);
+   const pn=tr_.model().predict(Xte);pb(100);st("Done. Neural network stopped at epoch "+tr_.ep+" (early stopping).");
+   const rows=[["Linear Regression (Analytical OLS)",pl],["Neural Network (MLP 64x32)",pn]];
+   $("res").innerHTML="<tr><th>Model</th><th>MAE (lakh)</th><th>RMSE (lakh)</th><th>R²</th></tr>"+rows.map(([n,p])=>`<tr><td>${n}</td><td>${mae(yte,p).toFixed(4)}</td><td>${rmse(yte,p).toFixed(4)}</td><td>${r2(yte,p).toFixed(4)}</td></tr>`).join("");
+   const cs=getComputedStyle(document.documentElement);
+   plot($("c1"),yte,pl,cs.getPropertyValue("--a"),"Linear Regression (Analytical OLS)");plot($("c2"),yte,pn,cs.getPropertyValue("--b"),"Neural Network (MLP 64x32)");
+   pred=yte.map((v,i)=>({Actual:v,Linear_Prediction:+pl[i].toFixed(4),NeuralNet_Prediction:+pn[i].toFixed(4)}));
+   $("run").disabled=false;$("run").textContent="Run again";$("dl1").disabled=$("dl2").disabled=false})()},30)}}
+</script></body></html>
